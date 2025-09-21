@@ -2,45 +2,38 @@ name: 自动保活 SAP
 
 on:
   schedule:
-    - cron: '58 23 * * *'     # actions时间不准，不准确再酌情调整
-  workflow_dispatch:  # 允许手动触发
+    - cron: '17 00 * * *'      
+  workflow_dispatch:          # 允许手动触发
 
 jobs:
   restart-sg-apps:
     runs-on: ubuntu-latest
-    name: Restart SG Apps
-    if: always()  
+    name: 重启新加坡(SG)区域应用
+    if: always()
     continue-on-error: true
-    
+
     steps:
-    - name: Checkout code
+    - name: 检出代码
       uses: actions/checkout@v4
 
-    - name: Install CF CLI
+    - name: 安装 CF CLI
       run: |
         wget -q -O - https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key | sudo apt-key add -
         echo "deb https://packages.cloudfoundry.org/debian stable main" | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
         sudo apt-get update
         sudo apt-get install -y cf8-cli
 
-    - name: Determine CF API endpoint
+    - name: 设置 SG 区域 API 端点
       run: |
         echo "CF_API=https://api.cf.ap21.hana.ondemand.com" >> $GITHUB_ENV
         echo "使用API端点: $CF_API (区域: SG)"
 
-    - name: Login to Cloud Foundry and auto-detect org/space
+    - name: 登录并自动检测组织和空间
       run: |
-        # 首先进行基础登录
         cf login -a ${{ env.CF_API }} -u "${{ secrets.EMAIL }}" -p "${{ secrets.PASSWORD }}"
         
         echo "自动检测SG区域可用的组织和空间..."
         
-        # 获取所有可用的组织
-        cf orgs > orgs.txt
-        echo "可用组织:"
-        cat orgs.txt
-        
-        # 自动选择第一个可用的组织（跳过标题行）
         SELECTED_ORG=$(cf orgs | grep -v "^name$" | grep -v "^Getting orgs" | grep -v "^$" | head -n 1 | awk '{print $1}')
         
         if [ -z "$SELECTED_ORG" ]; then
@@ -51,12 +44,6 @@ jobs:
         echo "选择组织: $SELECTED_ORG"
         cf target -o "$SELECTED_ORG"
         
-        # 获取该组织下的所有空间
-        cf spaces > spaces.txt
-        echo "可用空间:"
-        cat spaces.txt
-        
-        # 自动选择第一个可用的空间
         SELECTED_SPACE=$(cf spaces | grep -v "^name$" | grep -v "^Getting spaces" | grep -v "^$" | head -n 1 | awk '{print $1}')
         
         if [ -z "$SELECTED_SPACE" ]; then
@@ -67,42 +54,47 @@ jobs:
         echo "选择空间: $SELECTED_SPACE"
         cf target -s "$SELECTED_SPACE"
         
-        # 显示当前目标信息
         echo "当前SG区域目标:"
         cf target
         
-        # 将选择的组织和空间保存到环境变量中（用于后续步骤参考）
         echo "SELECTED_ORG=$SELECTED_ORG" >> $GITHUB_ENV
         echo "SELECTED_SPACE=$SELECTED_SPACE" >> $GITHUB_ENV
 
-    - name: Get all applications
+    - name: '[仅定时任务] 等待到 UTC+8 08:17'
+      if: github.event_name == 'schedule'
+      run: |
+        sudo apt-get update && sudo apt-get install -y jq
+        echo "定时任务触发，等待 UTC+8 时间到达 08:17..."
+        while true; do
+          current_time=$(curl -s http://worldtimeapi.org/api/timezone/Asia/Shanghai | jq -r '.datetime' | cut -c 12-16)
+          echo "当前 UTC+8 时间: $current_time"
+          if [[ "$current_time" == "08:17" ]]; then
+            echo "时间到达 08:17，开始执行重启任务。"
+            break
+          fi
+          echo "时间未到，30秒后重试..."
+          sleep 30
+        done
+
+    - name: 获取所有应用
       id: get-sg-apps
       run: |
         echo "扫描SG区域中的所有应用..."
-        echo "目标组织: ${{ env.SELECTED_ORG }}"
-        echo "目标空间: ${{ env.SELECTED_SPACE }}"
-        
-        # 获取所有应用名称（跳过前 3 行提示和表头）
         apps=$(cf apps | awk 'NR>3 {print $1}' | grep -v '^$')
         echo "发现的应用:"
         echo "$apps"
-        
-        # 统计应用数量
         if [ -n "$apps" ]; then
           app_count=$(echo "$apps" | wc -l)
           echo "SG区域总共发现 $app_count 个应用"
         else
           echo "SG区域未发现任何应用"
         fi
-        
-        # 直接输出到 GITHUB_OUTPUT（多行字符串）
         echo "apps<<EOF" >> $GITHUB_OUTPUT
         echo "$apps" >> $GITHUB_OUTPUT
         echo "EOF" >> $GITHUB_OUTPUT
 
-    - name: Restart all applications
+    - name: 重启所有应用
       run: |
-        # 从上一步获取应用列表
         apps="${{ steps.get-sg-apps.outputs.apps }}"
         if [ -z "$apps" ]; then
           echo "在SG区域中未找到任何应用，跳过重启操作"
@@ -110,19 +102,11 @@ jobs:
         fi
         
         echo "开始重启SG区域中的应用:"
-        echo "目标组织: ${{ env.SELECTED_ORG }}"
-        echo "目标空间: ${{ env.SELECTED_SPACE }}"
-        echo "应用列表:"
-        echo "$apps"
-        echo "----------------------------------------"
-        
-        # 重启每个应用
         success_count=0
         failure_count=0
         
         for app in $apps; do
           echo "正在重启应用: $app"
-          
           if cf restart "$app"; then
             echo "应用 $app 重启成功"
             success_count=$((success_count + 1))
@@ -130,58 +114,47 @@ jobs:
             echo "应用 $app 重启失败"
             failure_count=$((failure_count + 1))
           fi
-          
           echo "----------------------------------------"
-          sleep 15  # 每个应用之间等待 15 秒
+          sleep 15
         done
         
         echo "SG区域重启操作完成"
         echo "成功重启: $success_count 个应用"
         echo "重启失败: $failure_count 个应用"
 
-    - name: Verify applications status
+    - name: 验证应用状态
       run: |
         echo "验证SG区域应用状态..."
-        echo "组织: ${{ env.SELECTED_ORG }}"
-        echo "空间: ${{ env.SELECTED_SPACE }}"
-        echo "----------------------------------------"
         cf apps
 
   restart-us-apps:
     runs-on: ubuntu-latest
-    name: Restart US Apps
-    if: always()  
+    name: 重启美国(US)区域应用
+    if: always()
     continue-on-error: true
-    
+
     steps:
-    - name: Checkout code
+    - name: 检出代码
       uses: actions/checkout@v4
 
-    - name: Install CF CLI
+    - name: 安装 CF CLI
       run: |
         wget -q -O - https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key | sudo apt-key add -
         echo "deb https://packages.cloudfoundry.org/debian stable main" | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
         sudo apt-get update
         sudo apt-get install -y cf8-cli
 
-    - name: Determine CF API endpoint
+    - name: 设置 US 区域 API 端点
       run: |
         echo "CF_API=https://api.cf.us10-001.hana.ondemand.com" >> $GITHUB_ENV
         echo "使用API端点: $CF_API (区域: US)"
 
-    - name: Login to Cloud Foundry and auto-detect org/space
+    - name: 登录并自动检测组织和空间
       run: |
-        # 首先进行基础登录
         cf login -a ${{ env.CF_API }} -u "${{ secrets.EMAIL }}" -p "${{ secrets.PASSWORD }}"
         
         echo "自动检测US区域可用的组织和空间..."
         
-        # 获取所有可用的组织
-        cf orgs > orgs.txt
-        echo "可用组织:"
-        cat orgs.txt
-        
-        # 自动选择第一个可用的组织（跳过标题行）
         SELECTED_ORG=$(cf orgs | grep -v "^name$" | grep -v "^Getting orgs" | grep -v "^$" | head -n 1 | awk '{print $1}')
         
         if [ -z "$SELECTED_ORG" ]; then
@@ -192,12 +165,6 @@ jobs:
         echo "选择组织: $SELECTED_ORG"
         cf target -o "$SELECTED_ORG"
         
-        # 获取该组织下的所有空间
-        cf spaces > spaces.txt
-        echo "可用空间:"
-        cat spaces.txt
-        
-        # 自动选择第一个可用的空间
         SELECTED_SPACE=$(cf spaces | grep -v "^name$" | grep -v "^Getting spaces" | grep -v "^$" | head -n 1 | awk '{print $1}')
         
         if [ -z "$SELECTED_SPACE" ]; then
@@ -208,42 +175,47 @@ jobs:
         echo "选择空间: $SELECTED_SPACE"
         cf target -s "$SELECTED_SPACE"
         
-        # 显示当前目标信息
         echo "当前US区域目标:"
         cf target
         
-        # 将选择的组织和空间保存到环境变量中（用于后续步骤参考）
         echo "SELECTED_ORG=$SELECTED_ORG" >> $GITHUB_ENV
         echo "SELECTED_SPACE=$SELECTED_SPACE" >> $GITHUB_ENV
 
-    - name: Get all applications
+    - name: '[仅定时任务] 等待到 UTC+8 08:17'
+      if: github.event_name == 'schedule'
+      run: |
+        sudo apt-get update && sudo apt-get install -y jq
+        echo "定时任务触发，等待 UTC+8 时间到达 08:20..."
+        while true; do
+          current_time=$(curl -s http://worldtimeapi.org/api/timezone/Asia/Shanghai | jq -r '.datetime' | cut -c 12-16)
+          echo "当前 UTC+8 时间: $current_time"
+          if [[ "$current_time" == "08:20" ]]; then
+            echo "时间到达 08:20，开始执行重启任务。"
+            break
+          fi
+          echo "时间未到，30秒后重试..."
+          sleep 30
+        done
+
+    - name: 获取所有应用
       id: get-us-apps
       run: |
         echo "扫描US区域中的所有应用..."
-        echo "目标组织: ${{ env.SELECTED_ORG }}"
-        echo "目标空间: ${{ env.SELECTED_SPACE }}"
-        
-        # 获取所有应用名称（跳过前 3 行提示和表头）
         apps=$(cf apps | awk 'NR>3 {print $1}' | grep -v '^$')
         echo "发现的应用:"
         echo "$apps"
-        
-        # 统计应用数量
         if [ -n "$apps" ]; then
           app_count=$(echo "$apps" | wc -l)
           echo "US区域总共发现 $app_count 个应用"
         else
           echo "US区域未发现任何应用"
         fi
-        
-        # 直接输出到 GITHUB_OUTPUT（多行字符串）
         echo "apps<<EOF" >> $GITHUB_OUTPUT
         echo "$apps" >> $GITHUB_OUTPUT
         echo "EOF" >> $GITHUB_OUTPUT
 
-    - name: Restart all applications
+    - name: 重启所有应用
       run: |
-        # 从上一步获取应用列表
         apps="${{ steps.get-us-apps.outputs.apps }}"
         if [ -z "$apps" ]; then
           echo "在US区域中未找到任何应用，跳过重启操作"
@@ -251,19 +223,11 @@ jobs:
         fi
         
         echo "开始重启US区域中的应用:"
-        echo "目标组织: ${{ env.SELECTED_ORG }}"
-        echo "目标空间: ${{ env.SELECTED_SPACE }}"
-        echo "应用列表:"
-        echo "$apps"
-        echo "----------------------------------------"
-        
-        # 重启每个应用
         success_count=0
         failure_count=0
         
         for app in $apps; do
           echo "正在重启应用: $app"
-          
           if cf restart "$app"; then
             echo "应用 $app 重启成功"
             success_count=$((success_count + 1))
@@ -271,19 +235,15 @@ jobs:
             echo "应用 $app 重启失败"
             failure_count=$((failure_count + 1))
           fi
-          
           echo "----------------------------------------"
-          sleep 15  # 每个应用之间等待 15 秒
+          sleep 15
         done
         
         echo "US区域重启操作完成"
         echo "成功重启: $success_count 个应用"
         echo "重启失败: $failure_count 个应用"
 
-    - name: Verify applications status
+    - name: 验证应用状态
       run: |
         echo "验证US区域应用状态..."
-        echo "组织: ${{ env.SELECTED_ORG }}"
-        echo "空间: ${{ env.SELECTED_SPACE }}"
-        echo "----------------------------------------"
         cf apps
