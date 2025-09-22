@@ -1,5 +1,4 @@
-# Auto-SAP应用部署说明文档
- 如果发现部署在启动阶段失败耐心等到第二天即可会自动恢复的
+# 部署失败请等到早上八点在部署 百分之百可以 
 ### 前置要求
 * GitHub 账户：需要有一个 GitHub 账户来创建仓库和设置工作流
 * SAP Cloud Foundry 账户：需要有 SAP Cloud Foundry 的有效账户，点此注册：https://www.sap.com
